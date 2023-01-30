@@ -15,7 +15,7 @@ rust-version = "1.53"
 [features]
 # Only royalty-free open standard codecs and formats are enabled by default.
 # TODO: Remove all defaults for v0.6.0. Features should be additive.
-default = ["adpcm", "flac", "mkv", "ogg", "pcm", "vorbis", "wav"]
+default = ["adpcm", "flac", "mkv", "ogg", "pcm", "vorbis", "wav", "aiff"]
 
 # Enable specific codecs and formats.
 # TODO: Use "dep:" after MSRV is raised to >= 1.60.
@@ -32,6 +32,7 @@ ogg = ["symphonia-format-ogg"]
 pcm = ["symphonia-codec-pcm"]
 vorbis = ["symphonia-codec-vorbis"]
 wav = ["symphonia-format-wav"]
+aiff = ["symphonia-format-aiff"]
 
 # MPEG audio codecs.
 mpa = ["mp1", "mp2", "mp3"]
@@ -54,7 +55,8 @@ all-formats = [
     "isomp4",
     "mkv",
     "ogg",
-    "wav"
+    "wav",
+    "aiff",
 ]
 
 # Enable all supported codecs and formats.
@@ -109,6 +111,11 @@ optional = true
 [dependencies.symphonia-codec-vorbis]
 version = "0.5.2"
 path = "../symphonia-codec-vorbis"
+optional = true
+
+[dependencies.symphonia-format-aiff]
+version = "0.5.2"
+path = "../symphonia-format-aiff"
 optional = true
 
 [dependencies.symphonia-format-wav]
