@@ -183,6 +183,8 @@ pub mod default {
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
         pub use symphonia_format_riff::WavReader;
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::WavPackReader;
 
         #[deprecated = "use `default::formats::MpaReader` instead"]
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -287,6 +289,10 @@ pub mod default {
 
         #[cfg(feature = "wav")]
         probe.register_all::<formats::WavReader>();
+
+
+        #[cfg(feature = "wavpack")]
+        probe.register_all::<formats::WavPackReader>();
 
         #[cfg(feature = "ogg")]
         probe.register_all::<formats::OggReader>();

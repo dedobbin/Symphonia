@@ -33,6 +33,7 @@ ogg = ["symphonia-format-ogg"]
 pcm = ["symphonia-codec-pcm"]
 aiff = ["symphonia-format-riff/aiff"]
 vorbis = ["symphonia-codec-vorbis"]
+wavpack = ["symphonia-codec-wavpack"]
 wav = ["symphonia-format-riff/wav"]
 
 # MPEG audio codecs.
@@ -49,6 +50,7 @@ all-codecs = [
     "mp3",
     "pcm",
     "vorbis",
+    "wavpack",
 ]
 
 # Enable all supported formats.
@@ -125,6 +127,11 @@ optional = true
 [dependencies.symphonia-codec-vorbis]
 version = "0.5.4"
 path = "../symphonia-codec-vorbis"
+optional = true
+
+[dependencies.symphonia-codec-wavpack]
+version = "0.5.4"
+path = "../symphonia-codec-wavpack"
 optional = true
 
 [dependencies.symphonia-format-riff]
