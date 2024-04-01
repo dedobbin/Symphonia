@@ -181,6 +181,16 @@ pub const CODEC_TYPE_ADPCM_IMA_QT: CodecType = CodecType(0x205);
 // Compressed lossy audio codecs
 //------------------------------
 
+// Wavpack audio codecs
+//-------------------
+pub const CODEC_TYPE_WAVPACK_PCM_I_8: CodecType = CodecType(0x305);
+pub const CODEC_TYPE_WAVPACK_PCM_I_16: CodecType = CodecType(0x306);
+pub const CODEC_TYPE_WAVPACK_PCM_I_24: CodecType = CodecType(0x307);
+pub const CODEC_TYPE_WAVPACK_PCM_I_32: CodecType = CodecType(0x308);
+pub const CODEC_TYPE_WAVPACK_PCM_FLOAT: CodecType = CodecType(0x309);
+pub const CODEC_TYPE_WAVPACK_DSD: CodecType = CodecType(0x310);
+
+
 /// Vorbis
 pub const CODEC_TYPE_VORBIS: CodecType = CodecType(0x1000);
 /// MPEG Layer 1 (MP1)

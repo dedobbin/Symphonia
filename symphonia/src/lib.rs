@@ -156,6 +156,8 @@ pub mod default {
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "vorbis")]
         pub use symphonia_codec_vorbis::VorbisDecoder;
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::WavPackDecoder;
 
         #[deprecated = "use `default::codecs::MpaDecoder` instead"]
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -258,6 +260,10 @@ pub mod default {
 
         #[cfg(feature = "vorbis")]
         registry.register_all::<codecs::VorbisDecoder>();
+
+        #[cfg(feature = "wavpack")]
+        registry.register_all::<codecs::WavPackDecoder>();
+
     }
 
     /// Registers all the formats selected by the `feature` flags in the includer's `Cargo.toml` on
