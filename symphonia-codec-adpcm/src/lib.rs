@@ -27,8 +27,8 @@ use symphonia_core::codecs::audio::well_known::{
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::errors::{Result, unsupported_error};
-use symphonia_core::formats::Packet;
 use symphonia_core::io::ReadBytes;
+use symphonia_core::packet::Packet;
 
 mod codec_ima_qt;
 mod codec_ima_wav;
@@ -124,7 +124,7 @@ impl AdpcmDecoder {
 
         let frames_per_block = self.params.frames_per_block.unwrap() as usize;
 
-        let block_count = packet.block_dur() as usize / frames_per_block;
+        let block_count = packet.block_dur().get() as usize / frames_per_block;
 
         self.buf.clear();
         self.buf.render_uninit(Some(block_count * frames_per_block));

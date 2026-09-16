@@ -15,7 +15,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
+use std::path::PathBuf;
 
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::codecs::audio::{AudioDecoderOptions, FinalizeResult};
@@ -24,7 +24,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, ReadOnlySource};
 use symphonia::core::meta::{MetadataOptions, Visual};
-use symphonia::core::units::Time;
+use symphonia::core::units::{Duration, Time, Timestamp};
 
 use clap::{Arg, ArgMatches};
 use log::{error, info, warn};
@@ -37,8 +37,8 @@ mod resampler;
 
 #[derive(Copy, Clone)]
 enum SeekPosition {
-    Time(f64),
-    Timestamp(u64),
+    Time(Time),
+    Timestamp(Timestamp),
 }
 
 fn main() {
@@ -53,6 +53,7 @@ fn main() {
                 .long("seek")
                 .short('s')
                 .value_name("TIME")
+                .value_parser(clap::value_parser!(f64))
                 .help("Seek to the time in seconds")
                 .conflicts_with_all(&[
                     "seek-ts",
@@ -67,6 +68,8 @@ fn main() {
                 .long("seek-ts")
                 .short('S')
                 .value_name("TIMESTAMP")
+                .value_parser(clap::value_parser!(i64))
+                .allow_hyphen_values(true)
                 .help("Seek to the timestamp in timebase units")
                 .conflicts_with_all(&[
                     "seek",
@@ -77,7 +80,12 @@ fn main() {
                 ]),
         )
         .arg(
-            Arg::new("track").long("track").short('t').value_name("TRACK").help("The track to use"),
+            Arg::new("track")
+                .long("track")
+                .short('t')
+                .value_name("TRACK")
+                .value_parser(clap::value_parser!(usize))
+                .help("The track to use"),
         )
         .arg(
             Arg::new("decode-only")
@@ -115,6 +123,7 @@ fn main() {
         .arg(
             Arg::new("INPUT")
                 .help("The input file path, or - to use standard input")
+                .value_parser(clap::value_parser!(PathBuf))
                 .required(true)
                 .index(1),
         )
@@ -133,7 +142,7 @@ fn main() {
 }
 
 fn run(args: &ArgMatches) -> Result<i32> {
-    let path = Path::new(args.value_of("INPUT").unwrap());
+    let path = args.get_one::<PathBuf>("INPUT").expect("path is a required argument");
 
     // Create a hint to help the format registry guess what format reader is appropriate.
     let mut hint = Hint::new();
@@ -159,8 +168,7 @@ fn run(args: &ArgMatches) -> Result<i32> {
     let mss = MediaSourceStream::new(source, Default::default());
 
     // Use the default options for format readers other than for gapless playback.
-    let fmt_opts =
-        FormatOptions { enable_gapless: !args.is_present("no-gapless"), ..Default::default() };
+    let fmt_opts: FormatOptions = Default::default();
 
     // Use the default options for metadata readers.
     let meta_opts: MetadataOptions = Default::default();
@@ -179,7 +187,9 @@ fn run(args: &ArgMatches) -> Result<i32> {
             }
 
             // Get the value of the track number option, if provided.
-            let track_num = args.value_of("track").and_then(|value| value.parse::<usize>().ok());
+            let track_num = args.get_one::<usize>("track").copied();
+
+            let dec_opts = AudioDecoderOptions::default().gapless(!args.is_present("no-gapless"));
 
             // Select the operating mode.
             if args.is_present("probe-only") {
@@ -189,19 +199,12 @@ fn run(args: &ArgMatches) -> Result<i32> {
             }
             else if args.is_present("verify-only") {
                 // Verify-only mode decodes and verifies the audio, but does not play it.
-                let opts = DecodeOptions {
-                    decoder_opts: AudioDecoderOptions { verify: true, ..Default::default() },
-                    track_num,
-                };
-
+                let opts = DecodeOptions { dec_opts: dec_opts.verify(true), track_num };
                 decode_only(format, opts)
             }
             else if args.is_present("decode-only") {
                 // Decode-only mode decodes the audio, but does not play or verify it.
-                let opts = DecodeOptions {
-                    decoder_opts: AudioDecoderOptions { verify: false, ..Default::default() },
-                    track_num,
-                };
+                let opts = DecodeOptions { dec_opts: dec_opts.verify(false), track_num };
 
                 decode_only(format, opts)
             }
@@ -210,21 +213,18 @@ fn run(args: &ArgMatches) -> Result<i32> {
                 ui::print_format(path, &mut format);
 
                 // If present, parse the seek argument.
-                let seek_pos = if let Some(time) = args.value_of("seek") {
-                    Some(SeekPosition::Time(time.parse::<f64>().unwrap_or(0.0)))
+                let seek_pos = if args.contains_id("seek") {
+                    args.get_one::<f64>("seek")
+                        .and_then(|&time| Time::try_from_secs_f64(time))
+                        .map(SeekPosition::Time)
                 }
                 else {
-                    args.value_of("seek-ts")
-                        .map(|ts| SeekPosition::Timestamp(ts.parse::<u64>().unwrap_or(0)))
+                    args.get_one::<Timestamp>("seek-ts").map(|&ts| SeekPosition::Timestamp(ts))
                 };
 
                 // Setup playback options.
                 let opts = PlayOptions {
-                    // Decoder options.
-                    decoder_opts: AudioDecoderOptions {
-                        verify: args.is_present("verify"),
-                        ..Default::default()
-                    },
+                    decoder_opts: dec_opts.verify(args.is_present("verify")),
                     track_num,
                     seek_pos,
                     no_progress: args.is_present("no-progress"),
@@ -245,7 +245,7 @@ fn run(args: &ArgMatches) -> Result<i32> {
 /// Options for the decode command.
 #[derive(Copy, Clone)]
 struct DecodeOptions {
-    decoder_opts: AudioDecoderOptions,
+    dec_opts: AudioDecoderOptions,
     track_num: Option<usize>,
 }
 
@@ -272,7 +272,7 @@ fn decode_only(mut reader: Box<dyn FormatReader>, opts: DecodeOptions) -> Result
 
     // Create a decoder for the track.
     let mut decoder =
-        symphonia::default::get_codecs().make_audio_decoder(codec_params, &opts.decoder_opts)?;
+        symphonia::default::get_codecs().make_audio_decoder(codec_params, &opts.dec_opts)?;
 
     // Save the track ID to filter demuxed packets.
     let track_id = track.id;
@@ -317,7 +317,7 @@ struct PlayOptions {
 struct PlayTrackOptions {
     decoder_opts: AudioDecoderOptions,
     track_id: u32,
-    seek_ts: u64,
+    seek_ts: Timestamp,
     no_progress: bool,
 }
 
@@ -339,7 +339,7 @@ fn play(mut reader: Box<dyn FormatReader>, opts: PlayOptions) -> Result<i32> {
     // seeked position.
     let seek_ts = if let Some(seek_pos) = opts.seek_pos {
         let seek_to = match seek_pos {
-            SeekPosition::Time(t) => SeekTo::Time { time: Time::from(t), track_id: Some(track_id) },
+            SeekPosition::Time(time) => SeekTo::Time { time, track_id: Some(track_id) },
             SeekPosition::Timestamp(ts) => SeekTo::TimeStamp { ts, track_id },
         };
 
@@ -353,18 +353,18 @@ fn play(mut reader: Box<dyn FormatReader>, opts: PlayOptions) -> Result<i32> {
                     Some(id) => id,
                     _ => return Ok(0),
                 };
-                0
+                Timestamp::ZERO
             }
             Err(err) => {
                 // Don't give-up on a seek error.
                 warn!("seek error: {err}");
-                0
+                Timestamp::ZERO
             }
         }
     }
     else {
         // If not seeking, the seek timestamp is 0.
-        0
+        Timestamp::ZERO
     };
 
     let mut track_options = PlayTrackOptions {
@@ -385,7 +385,7 @@ fn play(mut reader: Box<dyn FormatReader>, opts: PlayOptions) -> Result<i32> {
                     Some(id) => id,
                     _ => return Ok(0),
                 };
-                track_options.seek_ts = 0;
+                track_options.seek_ts = Timestamp::ZERO;
             }
             res => break res,
         }
@@ -423,7 +423,7 @@ fn play_track(
 
     // Get the selected track's timebase and duration.
     let tb = track.time_base;
-    let dur = track.num_frames.map(|frames| track.start_ts + frames);
+    let dur = track.num_frames.map(Duration::new);
 
     // Decode and play the packets belonging to the selected track.
     loop {
@@ -454,7 +454,7 @@ fn play_track(
                 if audio_output.is_none() {
                     // Get the capacity of the decoded buffer. Note that this is capacity, not
                     // length! The output will use this to size its internal buffers appropriately.
-                    let duration = decoded.capacity() as u64;
+                    let duration = Duration::from(decoded.capacity() as u64);
 
                     // Try to open the audio output.
                     audio_output.replace(output::try_open(decoded.spec(), duration).unwrap());
@@ -470,9 +470,9 @@ fn play_track(
                 // should be decoded and *samples* discarded up-to the exact *sample* indicated by
                 // required_ts. The current approach will discard extra samples if seeking to a
                 // sample within a packet.
-                if packet.ts() >= opts.seek_ts {
+                if packet.pts() >= opts.seek_ts {
                     if !opts.no_progress {
-                        ui::print_progress(packet.ts(), dur, tb);
+                        ui::print_progress(packet.pts(), dur, tb);
                     }
 
                     if let Some(audio_output) = audio_output {

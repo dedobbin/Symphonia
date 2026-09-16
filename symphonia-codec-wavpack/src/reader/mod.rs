@@ -55,7 +55,7 @@ pub struct WavPackReader<'a> {
     tracks: Vec<Track>,
     metadata: MetadataLog,
     chapters: Option<ChapterGroup>,
-    next_packet_ts: u64,
+    next_packet_ts: Timestamp,
 }
 
 impl<'s> WavPackReader<'s> {
@@ -111,7 +111,7 @@ impl<'s> WavPackReader<'s> {
             tracks: vec![track],
             metadata,
             chapters: None,
-            next_packet_ts: 0,
+            next_packet_ts: Timestamp::ZERO,
         });
 
     }
@@ -163,16 +163,14 @@ impl FormatReader for WavPackReader<'_> {
                 // Version 5.0 a checksum of 4-6 bytes was added.
                 SubBlock::WvBitStream(data) => {
                     // block_samples is the per-channel frame count
-                    let n = u64::from(header.block_samples);
+                    let n = Duration::new(u64::from(header.block_samples));
                     let ts = self.next_packet_ts;
-                    self.next_packet_ts += n;
+                    self.next_packet_ts = match self.next_packet_ts.checked_add(n) {
+                        Some(ts) => ts,
+                        None => return Ok(None),
+                    };
 
-                    return Ok(Some(Packet::new_from_boxed_slice(
-                        0,
-                        ts,
-                        n,
-                        data.into_boxed_slice(),
-                    )));
+                    return Ok(Some(Packet::new(0, ts, n, data.into_boxed_slice())));
                 },
                 SubBlock::WvcBitStream(data) => {
                     debug!("wvc stream");

@@ -12,8 +12,8 @@ use symphonia_core::codecs::audio::{
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
-use symphonia_core::formats::Packet;
 use symphonia_core::io::FiniteStream;
+use symphonia_core::packet::Packet;
 use symphonia_core::support_audio_codec;
 
 #[cfg(feature = "mp1")]
@@ -57,13 +57,14 @@ impl State {
 
 /// MPEG1 and MPEG2 audio layer 1, 2, and 3 decoder.
 pub struct MpaDecoder {
+    opts: AudioDecoderOptions,
     params: AudioCodecParameters,
     state: State,
     buf: AudioBuffer<f32>,
 }
 
 impl MpaDecoder {
-    pub fn try_new(params: &AudioCodecParameters, _: &AudioDecoderOptions) -> Result<Self> {
+    pub fn try_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Self> {
         // This decoder only supports MP1, MP2, and MP3.
         match params.codec {
             #[cfg(feature = "mp1")]
@@ -78,7 +79,7 @@ impl MpaDecoder {
         // Create decoder state.
         let state = State::new(params.codec);
 
-        Ok(MpaDecoder { params: params.clone(), state, buf: Default::default() })
+        Ok(MpaDecoder { opts: *opts, params: params.clone(), state, buf: Default::default() })
     }
 
     fn decode_inner(&mut self, packet: &Packet) -> Result<()> {
@@ -125,7 +126,10 @@ impl MpaDecoder {
             _ => return decode_error("mpa: invalid mpeg audio layer"),
         }
 
-        self.buf.trim(packet.trim_start() as usize, packet.trim_end() as usize);
+        // Trim gaps.
+        if self.opts.gapless {
+            self.buf.trim(packet.trim_start().get() as usize, packet.trim_end().get() as usize);
+        }
 
         Ok(())
     }

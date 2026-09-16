@@ -14,7 +14,7 @@ use crate::audio::{Channels, GenericAudioBufferRef};
 use crate::codecs::{CodecInfo, CodecProfile};
 use crate::common::FourCc;
 use crate::errors::Result;
-use crate::formats::Packet;
+use crate::packet::Packet;
 
 /// An `AudioCodecId` is a unique identifier used to identify a specific audio codec.
 ///
@@ -194,10 +194,45 @@ pub struct FinalizeResult {
 }
 
 /// `AudioDecoderOptions` is a common set of options that all audio decoders use.
-#[derive(Copy, Clone, Debug, Default)]
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug)]
 pub struct AudioDecoderOptions {
+    /// Enable support for gapless playback.
+    ///
+    /// When enabled, the decoder will trim any delay or padding frames.
+    ///
+    /// Default: `true`.
+    pub gapless: bool,
     /// The decoded audio should be verified if possible during the decode process.
+    ///
+    /// Default: `false`.
     pub verify: bool,
+}
+
+impl Default for AudioDecoderOptions {
+    fn default() -> Self {
+        Self { gapless: true, verify: false }
+    }
+}
+
+impl AudioDecoderOptions {
+    /// Enable or disable support for gapless playback.
+    ///
+    /// When enabled, the decoder will trim any delay or padding frames.
+    ///
+    /// Default: `true`.
+    pub fn gapless(mut self, enable: bool) -> Self {
+        self.gapless = enable;
+        self
+    }
+
+    /// Enable or disable decoded audio verification if the decoder supports it.
+    ///
+    /// Default: `false`.
+    pub fn verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
+        self
+    }
 }
 
 /// An `AudioDecoder` implements an audio codec's decode algorithm. It consumes `Packet`s and

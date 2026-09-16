@@ -19,8 +19,8 @@ use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult, VerificationCheck};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
-use symphonia_core::formats::Packet;
 use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr};
+use symphonia_core::packet::Packet;
 use symphonia_core::support_audio_codec;
 use symphonia_core::util::bits::sign_extend_leq32_to_i32;
 
@@ -154,6 +154,9 @@ impl FlacDecoder {
         else {
             return decode_error("flac: bits per sample not provided");
         };
+        if bits_per_sample > u32::BITS {
+            return decode_error("flac: invalid bit width");
+        }
 
         // trace!("frame: [{:?}] strategy={:?}, n_samples={}, bps={}, channels={:?}",
         //     header.block_sequence,
@@ -163,6 +166,9 @@ impl FlacDecoder {
         //     &header.channel_assignment);
 
         // Reserve a writeable chunk in the buffer equal to the number of samples in the block.
+        if header.block_num_samples as usize > self.buf.capacity() {
+            return decode_error("flac: allocation would overflow buffer");
+        }
         self.buf.clear();
         self.buf.render_uninit(Some(header.block_num_samples as usize));
 
@@ -358,6 +364,11 @@ fn read_subframe<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32, buf: &mut [i32]) ->
     // bits per sample in the audio sub-block. If the bit is set, unary decode the number of
     // dropped bits per sample.
     let dropped_bps = if bs.read_bool()? { bs.read_unary_zeros()? + 1 } else { 0 };
+    if dropped_bps > frame_bps {
+        return decode_error(
+            "flac: dropped bits per sample is greater than the frame bits per sample",
+        );
+    }
 
     // The bits per sample stated in the frame header is for the decoded audio sub-block samples.
     // However, it is likely that the lower order bits of all the samples are simply 0. Therefore,
@@ -417,6 +428,10 @@ fn decode_fixed_linear<B: ReadBitsLtr>(
     order: u32,
     buf: &mut [i32],
 ) -> Result<()> {
+    if order as usize > buf.len() {
+        return decode_error("flac: fixed predictor order is greater than the block size");
+    }
+
     // The first `order` samples are encoded verbatim to warm-up the LPC decoder.
     decode_verbatim(bs, bps, &mut buf[..order as usize])?;
 
@@ -434,6 +449,10 @@ fn decode_fixed_linear<B: ReadBitsLtr>(
 }
 
 fn decode_linear<B: ReadBitsLtr>(bs: &mut B, bps: u32, order: u32, buf: &mut [i32]) -> Result<()> {
+    if order as usize > buf.len() {
+        return decode_error("flac: predictor order is greater than the block size");
+    }
+
     // The order of the Linear Predictor should be between 1 and 32.
     debug_assert!(order > 0 && order <= 32);
 
@@ -651,7 +670,7 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
         // s(i) = 1*s(i),
         1 => {
             for i in 1..buf.len() {
-                buf[i] += buf[i - 1];
+                buf[i] = buf[i].wrapping_add(buf[i - 1]);
             }
         }
         // A 2nd order predictor uses the polynomial: s(i) = 2*s(i-1) - 1*s(i-2).
@@ -659,7 +678,7 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
             for i in 2..buf.len() {
                 let a = Wrapping(-1) * Wrapping(i64::from(buf[i - 2]));
                 let b = Wrapping(2) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] += (a + b).0 as i32;
+                buf[i] = buf[i].wrapping_add((a + b).0 as i32);
             }
         }
         // A 3rd order predictor uses the polynomial: s(i) = 3*s(i-1) - 3*s(i-2) + 1*s(i-3).
@@ -668,7 +687,7 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
                 let a = Wrapping(1) * Wrapping(i64::from(buf[i - 3]));
                 let b = Wrapping(-3) * Wrapping(i64::from(buf[i - 2]));
                 let c = Wrapping(3) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] += (a + b + c).0 as i32;
+                buf[i] = buf[i].wrapping_add((a + b + c).0 as i32);
             }
         }
         // A 4th order predictor uses the polynomial:
@@ -679,7 +698,7 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
                 let b = Wrapping(4) * Wrapping(i64::from(buf[i - 3]));
                 let c = Wrapping(-6) * Wrapping(i64::from(buf[i - 2]));
                 let d = Wrapping(4) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] += (a + b + c + d).0 as i32;
+                buf[i] = buf[i].wrapping_add((a + b + c + d).0 as i32);
             }
         }
         _ => unreachable!(),

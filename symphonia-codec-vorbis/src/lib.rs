@@ -26,8 +26,8 @@ use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::dsp::mdct::Imdct;
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
-use symphonia_core::formats::Packet;
 use symphonia_core::io::{BitReaderRtl, BufReader, FiniteBitStream, ReadBitsRtl, ReadBytes};
+use symphonia_core::packet::Packet;
 use symphonia_core::support_audio_codec;
 
 use symphonia_common::xiph::audio::vorbis::*;
@@ -50,6 +50,8 @@ use window::Windows;
 
 /// Vorbis decoder.
 pub struct VorbisDecoder {
+    /// Decoder options.
+    opts: AudioDecoderOptions,
     /// Codec paramters.
     params: AudioCodecParameters,
     /// Identity header.
@@ -70,8 +72,24 @@ pub struct VorbisDecoder {
     buf: AudioBuffer<f32>,
 }
 
+fn read_extradata(buf: &[u8]) -> Result<(IdentHeader, Setup)> {
+    let is_xiph_laced = !buf.is_empty() && buf[0] == XIPH_LACED_LEADING_HEADER;
+    if is_xiph_laced {
+        let (pkt_ident, pkt_setup) = unpack_xiph_laced_extradata(buf)?;
+        let ident = read_ident_header(&mut BufReader::new(pkt_ident))?;
+        let setup = read_setup(&mut BufReader::new(pkt_setup), &ident)?;
+        Ok((ident, setup))
+    }
+    else {
+        let mut reader = BufReader::new(buf);
+        let ident = read_ident_header(&mut reader)?;
+        let setup = read_setup(&mut reader, &ident)?;
+        Ok((ident, setup))
+    }
+}
+
 impl VorbisDecoder {
-    pub fn try_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Self> {
+    pub fn try_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Self> {
         // This decoder only supports Vorbis.
         if params.codec != CODEC_ID_VORBIS {
             return unsupported_error("vorbis: invalid codec");
@@ -84,13 +102,7 @@ impl VorbisDecoder {
         };
 
         // The extra data contains the identification and setup headers.
-        let mut reader = BufReader::new(extra_data);
-
-        // Read ident header.
-        let ident = read_ident_header(&mut reader)?;
-
-        // Read setup data.
-        let setup = read_setup(&mut reader, &ident)?;
+        let (ident, setup) = read_extradata(extra_data)?;
 
         // Initialize static DSP data.
         let windows = Windows::new(1 << ident.bs0_exp, 1 << ident.bs1_exp);
@@ -115,9 +127,10 @@ impl VorbisDecoder {
         let duration = 1 << ident.bs1_exp;
 
         let dsp =
-            Dsp { windows, channels: dsp_channels, imdct_short, imdct_long, lapping_state: None };
+            Dsp { windows, channels: dsp_channels, imdct_short, imdct_long, prev_block_flag: None };
 
         Ok(VorbisDecoder {
+            opts: *opts,
             params: params.clone(),
             ident,
             codebooks: setup.codebooks,
@@ -282,37 +295,39 @@ impl VorbisDecoder {
         self.buf.clear();
 
         // Calculate the output length and reserve space in the output buffer. If there was no
-        // previous packet, then return an empty audio buffer since the decoder will need another
-        // packet before being able to produce audio.
-        if let Some(lap_state) = &self.dsp.lapping_state {
-            // The previous block size.
-            let prev_block_n = if lap_state.prev_block_flag {
-                1 << self.ident.bs1_exp
-            }
-            else {
-                1 << self.ident.bs0_exp
-            };
+        // previous packet, then use the current block size so the rendered length is half the
+        // current block size.
+        let prev_block_flag = self.dsp.prev_block_flag.unwrap_or(mode.block_flag);
 
-            let render_len = (prev_block_n + n) / 4;
-            self.buf.render_uninit(Some(render_len));
-        }
+        let prev_block_n =
+            1 << if prev_block_flag { self.ident.bs1_exp } else { self.ident.bs0_exp };
+
+        self.buf.render_uninit(Some((prev_block_n + n) / 4));
 
         // Render all the audio channels.
         for (i, channel) in self.dsp.channels.iter_mut().enumerate() {
             channel.synth(
                 mode.block_flag,
-                &self.dsp.lapping_state,
+                prev_block_flag,
                 &self.dsp.windows,
                 imdct,
                 self.buf.plane_mut(map_vorbis_channel(self.ident.n_channels, i)).unwrap(),
             );
         }
 
-        // Trim
-        self.buf.trim(packet.trim_start() as usize, packet.trim_end() as usize);
+        // Trim gaps.
+        if self.opts.gapless {
+            if self.dsp.prev_block_flag.is_none() {
+                // The first packet after a decoder reset is silenced when trimming gaps.
+                self.buf.clear();
+            }
+            else {
+                self.buf.trim(packet.trim_start().get() as usize, packet.trim_end().get() as usize);
+            }
+        }
 
-        // Save the new lapping state.
-        self.dsp.lapping_state = Some(LappingState { prev_block_flag: mode.block_flag });
+        // Update the previous block flag.
+        self.dsp.prev_block_flag = Some(mode.block_flag);
 
         Ok(())
     }
