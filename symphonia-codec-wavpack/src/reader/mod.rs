@@ -162,15 +162,17 @@ impl FormatReader for WavPackReader<'_> {
                 // Final sub-block is usually audio, although this is not a strict rule.
                 // Version 5.0 a checksum of 4-6 bytes was added.
                 SubBlock::WvBitStream(data) => {
+                    // block_samples is the per-channel frame count
+                    let n = u64::from(header.block_samples);
                     let ts = self.next_packet_ts;
-                    let n_samples = header.get_n_samples();
-                    //let n_samples = data.len() / 4;
-                    let dur =  n_samples;
-                    self.next_packet_ts += n_samples as u64;
+                    self.next_packet_ts += n;
 
-                    // debug!("Got packet with {} samples, datasize: {}", n_samples, data.len());
-                    
-                    return Ok(Some(Packet::new_from_boxed_slice(0, ts, dur as u64, data.into_boxed_slice())));
+                    return Ok(Some(Packet::new_from_boxed_slice(
+                        0,
+                        ts,
+                        n,
+                        data.into_boxed_slice(),
+                    )));
                 },
                 SubBlock::WvcBitStream(data) => {
                     debug!("wvc stream");
