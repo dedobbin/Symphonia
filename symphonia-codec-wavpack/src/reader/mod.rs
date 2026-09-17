@@ -22,7 +22,7 @@ use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::audio::sample::SampleFormat;
 
-use log::{trace, debug};
+use log::{trace, debug, warn};
 
 mod subblocks;
 use subblocks::SubBlock;
@@ -55,7 +55,6 @@ pub struct WavPackReader<'a> {
     tracks: Vec<Track>,
     metadata: MetadataLog,
     chapters: Option<ChapterGroup>,
-    next_packet_ts: Timestamp,
 }
 
 impl<'s> WavPackReader<'s> {
@@ -111,7 +110,6 @@ impl<'s> WavPackReader<'s> {
             tracks: vec![track],
             metadata,
             chapters: None,
-            next_packet_ts: Timestamp::ZERO,
         });
 
     }
@@ -156,20 +154,25 @@ impl FormatReader for WavPackReader<'_> {
         
         _ = find_next_block(&mut self.reader, 10000);
         let header = Header::decode(&mut self.reader)?;
+        // TODO: If this block is INITIAL but not FINAL, keep reading following wvpk blocks
+        // until FINAL_BLOCK for 1 packet. Extra-channel blocks share
+        // block_index and shouldn't become seperate packages.
         loop {
             let sub_block = subblocks::decode(&mut self.reader)?;
             match sub_block {
                 // Final sub-block is usually audio, although this is not a strict rule.
                 // Version 5.0 a checksum of 4-6 bytes was added.
                 SubBlock::WvBitStream(data) => {
-                    // block_samples is the per-channel frame count
-                    let n = Duration::new(u64::from(header.block_samples));
-                    let ts = self.next_packet_ts;
-                    self.next_packet_ts = match self.next_packet_ts.checked_add(n) {
-                        Some(ts) => ts,
-                        None => return Ok(None),
+                    // timestamp is the sample index of this block. 
+                    // We don't use a running counter because "extra-channel blocks" associated with this block share this index 
+                    let ts = match Timestamp::try_from(header.get_block_index()) {
+                        Ok(ts) => ts,
+                        Err(_) => {
+                            warn!("wavpack: timestamp overflow");
+                            return Ok(None);
+                        }
                     };
-
+                    let n = Duration::new(u64::from(header.block_samples));
                     return Ok(Some(Packet::new(0, ts, n, data.into_boxed_slice())));
                 },
                 SubBlock::WvcBitStream(data) => {
