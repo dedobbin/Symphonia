@@ -26,7 +26,6 @@ use symphonia_core::audio::sample::SampleFormat;
 use log::{trace, debug, warn};
 
 mod subblocks;
-use subblocks::SubBlock;
 
 const MAX_FRAMES_PER_PACKET: u64 = 1152;
 
@@ -40,6 +39,8 @@ const WAVPACK_FORMAT_INFO: FormatInfo = FormatInfo {
 
 const STREAM_MARKER: [u8; 4] = *b"wvpk";
 const HEADER_SIZE: u32 = 32;
+const INITIAL_BLOCK: u32 = 0x800;
+const FINAL_BLOCK: u32 = 0x1000;
 
 const SAMPLE_RATES: [u32; 15] = [
     6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
@@ -67,9 +68,10 @@ impl<'s> WavPackReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
         //TODO: should already always be aligned, call isn't necessary
         let block_pos = find_next_block(&mut mss, 100)?;
-        let Some((header, _)) = read_block(&mut mss)? else {
+        let Some(first_block) = read_block(&mut mss)? else {
             return decode_error("wavpack: missing marker");
         };
+        let header = first_block.header;
         let samples_remaining = if header.get_block_index() == 0 {
             header.get_total_samples()
         } else {
@@ -167,56 +169,57 @@ impl FormatReader for WavPackReader<'_> {
             return Ok(None);
         }
 
-        // TODO: If this block is INITIAL but not FINAL, keep reading following wvpk blocks
-        // until FINAL_BLOCK for 1 packet. Extra-channel blocks share
-        // block_index and shouldn't become seperate packages.
-        loop {
-            let Some((header, body)) = read_block(&mut self.reader)? else {
-                return Ok(None);
-            };
+        let Some(first_block) = read_block(&mut self.reader)? else {
+            return Ok(None);
+        };
 
-            let body_len = body.len() as u64;
-            let mut body_reader = BufReader::new(&body);
-
-            while body_reader.pos() < body_len {
-                let sub_block = subblocks::decode(&mut body_reader)?;
-                match sub_block {
-                    // Final sub-block is usually audio, although this is not a strict rule.
-                    // Version 5.0 a checksum of 4-6 bytes was added.
-                    SubBlock::WvBitStream(data) => {
-                        // timestamp is the sample index of this block.
-                        // We don't use a running counter because "extra-channel blocks" associated with this block share this index
-                        let ts = match Timestamp::try_from(header.get_block_index()) {
-                            Ok(ts) => ts,
-                            Err(_) => {
-                                warn!("wavpack: timestamp overflow");
-                                return Ok(None);
-                            }
-                        };
-                        let n = Duration::new(u64::from(header.block_samples));
-                        if header.is_final_block() {
-                            if let Some(remaining) = self.samples_remaining {
-                                self.samples_remaining =
-                                    Some(remaining.saturating_sub(u64::from(header.block_samples)));
-                            }
-                        }
-                        return Ok(Some(Packet::new(0, ts, n, data.into_boxed_slice())));
-                    },
-                    SubBlock::WvcBitStream(data) => {
-                        debug!("wvc stream");
-                    },
-                    SubBlock::WvxBitStream(data) => {
-                        debug!("wvx stream");
-                    },
-                    SubBlock::DsdBlock(data) =>{
-                        todo!("DSD audio");
-                    }
-                    _ => {
-                        debug!("some non-audio block");
-                    }
-                }
-            }
+        if !first_block.header.is_initial_block() {
+            return decode_error("wavpack: packet does not start with an initial block");
         }
+
+        let block_index = first_block.header.get_block_index();
+        let block_samples = first_block.header.block_samples;
+        let mut packet_data = Vec::new();
+        let mut block = first_block;
+        let mut is_first_block = true;
+
+        loop {
+            if block.header.get_block_index() != block_index
+                || block.header.block_samples != block_samples
+            {
+                return decode_error("wavpack: multichannel segment sample range changed");
+            }
+            if !is_first_block && block.header.is_initial_block() {
+                return decode_error("wavpack: unexpected initial block in multichannel segment");
+            }
+
+            let is_final_block = block.header.is_final_block();
+            block.append_to(&mut packet_data);
+            if is_final_block {
+                break;
+            }
+
+            block = match read_block(&mut self.reader)? {
+                Some(block) => block,
+                None => return decode_error("wavpack: incomplete multichannel segment"),
+            };
+            is_first_block = false;
+        }
+
+        let timestamp = match Timestamp::try_from(block_index) {
+            Ok(timestamp) => timestamp,
+            Err(_) => {
+                warn!("wavpack: timestamp overflow");
+                return Ok(None);
+            }
+        };
+        let duration = Duration::new(u64::from(block_samples));
+        if let Some(remaining) = self.samples_remaining {
+            self.samples_remaining =
+                Some(remaining.saturating_sub(u64::from(block_samples)));
+        }
+
+        Ok(Some(Packet::new(0, timestamp, duration, packet_data.into_boxed_slice())))
     }
 
     fn metadata(&mut self) -> Metadata<'_> {
@@ -259,6 +262,28 @@ struct Header {
     block_samples: u32,
     flags: u32,
     crc: u32,
+}
+
+struct Block {
+    header: Header,
+    body: Box<[u8]>,
+}
+
+impl Block {
+    fn append_to(self, packet_data: &mut Vec<u8>) {
+        packet_data.reserve(HEADER_SIZE as usize + self.body.len());
+        packet_data.extend_from_slice(&STREAM_MARKER);
+        packet_data.extend_from_slice(&self.header.ck_size.to_le_bytes());
+        packet_data.extend_from_slice(&self.header.version.to_le_bytes());
+        packet_data.push(self.header.block_index_u8);
+        packet_data.push(self.header.total_samples_u8);
+        packet_data.extend_from_slice(&self.header.total_samples_u32.to_le_bytes());
+        packet_data.extend_from_slice(&self.header.block_index_u32.to_le_bytes());
+        packet_data.extend_from_slice(&self.header.block_samples.to_le_bytes());
+        packet_data.extend_from_slice(&self.header.flags.to_le_bytes());
+        packet_data.extend_from_slice(&self.header.crc.to_le_bytes());
+        packet_data.extend_from_slice(&self.body);
+    }
 }
 
 impl Header {
@@ -345,8 +370,12 @@ impl Header {
         ((self.flags >> 2) & 0b1) == 0
     }
 
+    fn is_initial_block(&self) -> bool {
+        self.flags & INITIAL_BLOCK != 0
+    }
+
     fn is_final_block(&self) -> bool {
-        self.flags & 0x1000 != 0
+        self.flags & FINAL_BLOCK != 0
     }
 
     fn get_sample_rate(&self) -> Option<u32> {
@@ -388,7 +417,7 @@ fn find_next_block(source: &mut MediaSourceStream<'_>, max_bytes: usize) -> Resu
     }
 }
 
-fn read_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(Header, Box<[u8]>)>> {
+fn read_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<Block>> {
     let header = match Header::decode(reader) {
         Ok(header) => header,
         Err(Error::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => return Ok(None),
@@ -396,5 +425,5 @@ fn read_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(Header, Box<
     };
 
     let body = reader.read_boxed_slice_exact(header.body_len()?)?;
-    Ok(Some((header, body)))
+    Ok(Some(Block { header, body }))
 }
