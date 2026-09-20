@@ -110,8 +110,7 @@ impl<'s> WavPackReader<'s> {
             codec_params.with_sample_rate(sample_rate);
         }
         
-        // TODO: Store trailing metadata provided by the format probe in opts.external_data.
-        let metadata: MetadataLog = Default::default();
+        let metadata = opts.external_data.metadata.unwrap_or_default();
 
         let mut track = Track::new(0);
         track.with_codec_params(CodecParameters::Audio(codec_params));
