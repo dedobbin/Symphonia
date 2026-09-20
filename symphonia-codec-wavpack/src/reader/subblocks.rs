@@ -67,7 +67,7 @@ pub enum SubBlock {
     BlockChecksum(Vec<u8>),
 }
 
-pub fn decode(source: &mut MediaSourceStream<'_>) -> Result<SubBlock> {
+pub fn decode(source: &mut impl ReadBytes) -> Result<SubBlock> {
     let id = source.read_u8()?;
     if id & 0x3f == 0x3f {
         debug!("unique metadata function ID");
