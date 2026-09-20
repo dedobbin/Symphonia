@@ -57,6 +57,10 @@ pub struct WavPackReader<'a> {
     tracks: Vec<Track>,
     metadata: MetadataLog,
     chapters: Option<ChapterGroup>,
+    // samples_remaining comes from total_samples in first block (block_index 0). 
+    // Other block reporting total_samples can/should be ignored
+    // if unknown the file is kept being parsed, running into tags after last block (APE, etc)
+    samples_remaining: Option<u64>,
 }
 
 impl<'s> WavPackReader<'s> {
@@ -66,9 +70,12 @@ impl<'s> WavPackReader<'s> {
         let Some((header, _)) = read_block(&mut mss)? else {
             return decode_error("wavpack: missing marker");
         };
-        if header.get_block_index() != 0 {
+        let samples_remaining = if header.get_block_index() == 0 {
+            header.get_total_samples()
+        } else {
             debug!("First block is not first block after all. Total samples unknown");
-        }
+            None
+        };
         let channel_layout = match header.is_stereo() {
             true => layouts::CHANNEL_LAYOUT_STEREO,
             false => layouts::CHANNEL_LAYOUT_MONO,
@@ -113,6 +120,7 @@ impl<'s> WavPackReader<'s> {
             tracks: vec![track],
             metadata,
             chapters: None,
+            samples_remaining,
         });
 
     }
@@ -154,7 +162,11 @@ impl FormatReader for WavPackReader<'_> {
             return decode_error("wavpack: no tracks");
         }
 
-        
+        // do not parse bytes after the last wvpk block.
+        if self.samples_remaining == Some(0) {
+            return Ok(None);
+        }
+
         // TODO: If this block is INITIAL but not FINAL, keep reading following wvpk blocks
         // until FINAL_BLOCK for 1 packet. Extra-channel blocks share
         // block_index and shouldn't become seperate packages.
@@ -182,6 +194,12 @@ impl FormatReader for WavPackReader<'_> {
                             }
                         };
                         let n = Duration::new(u64::from(header.block_samples));
+                        if header.is_final_block() {
+                            if let Some(remaining) = self.samples_remaining {
+                                self.samples_remaining =
+                                    Some(remaining.saturating_sub(u64::from(header.block_samples)));
+                            }
+                        }
                         return Ok(Some(Packet::new(0, ts, n, data.into_boxed_slice())));
                     },
                     SubBlock::WvcBitStream(data) => {
@@ -325,6 +343,10 @@ impl Header {
 
     fn is_stereo(&self) -> bool {
         ((self.flags >> 2) & 0b1) == 0
+    }
+
+    fn is_final_block(&self) -> bool {
+        self.flags & 0x1000 != 0
     }
 
     fn get_sample_rate(&self) -> Option<u32> {
