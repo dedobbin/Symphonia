@@ -110,6 +110,7 @@ impl<'s> WavPackReader<'s> {
             codec_params.with_sample_rate(sample_rate);
         }
         
+        // TODO: Store trailing metadata provided by the format probe in opts.external_data.
         let metadata: MetadataLog = Default::default();
 
         let mut track = Track::new(0);
@@ -164,7 +165,7 @@ impl FormatReader for WavPackReader<'_> {
             return decode_error("wavpack: no tracks");
         }
 
-        // do not parse bytes after the last wvpk block.
+        // Trailing metadata is parsed separately by the format probe.
         if self.samples_remaining == Some(0) {
             return Ok(None);
         }
