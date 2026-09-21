@@ -58,10 +58,11 @@ pub struct WavPackReader<'a> {
     tracks: Vec<Track>,
     metadata: MetadataLog,
     chapters: Option<ChapterGroup>,
-    // samples_remaining comes from total_samples in first block (block_index 0). 
-    // Other block reporting total_samples can/should be ignored
-    // if unknown the file is kept being parsed, running into tags after last block (APE, etc)
-    samples_remaining: Option<u64>,
+    // Only the first block (block_index 0) provides the file's total sample count.
+    // Other blocks reporting this value should be ignored.
+    // If the total_samples is unknown reader will run into trailing metadata
+    total_samples: Option<u64>,
+    next_ts: u64,
 }
 
 impl<'s> WavPackReader<'s> {
@@ -72,7 +73,8 @@ impl<'s> WavPackReader<'s> {
             return decode_error("wavpack: missing marker");
         };
         let header = first_block.header;
-        let samples_remaining = if header.get_block_index() == 0 {
+        let block_index = header.get_block_index();
+        let total_samples = if block_index == 0 {
             header.get_total_samples()
         } else {
             debug!("First block is not first block after all. Total samples unknown");
@@ -122,7 +124,8 @@ impl<'s> WavPackReader<'s> {
             tracks: vec![track],
             metadata,
             chapters: None,
-            samples_remaining,
+            total_samples,
+            next_ts: block_index,
         });
 
     }
@@ -165,7 +168,7 @@ impl FormatReader for WavPackReader<'_> {
         }
 
         // Trailing metadata is parsed separately by the format probe.
-        if self.samples_remaining == Some(0) {
+        if self.total_samples.is_some_and(|total| self.next_ts >= total) {
             return Ok(None);
         }
 
@@ -214,10 +217,7 @@ impl FormatReader for WavPackReader<'_> {
             }
         };
         let duration = Duration::new(u64::from(block_samples));
-        if let Some(remaining) = self.samples_remaining {
-            self.samples_remaining =
-                Some(remaining.saturating_sub(u64::from(block_samples)));
-        }
+        self.next_ts = block_index.saturating_add(u64::from(block_samples));
 
         Ok(Some(Packet::new(0, timestamp, duration, packet_data.into_boxed_slice())))
     }
