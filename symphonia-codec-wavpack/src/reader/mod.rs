@@ -11,7 +11,9 @@ use std::mem::size_of;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_WAVPACK;
 use symphonia_core::support_format;
 
-use symphonia_core::errors::{decode_error, unsupported_error, Error, Result};
+use symphonia_core::errors::{
+    decode_error, seek_error, unsupported_error, Error, Result, SeekErrorKind,
+};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::io::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
@@ -63,11 +65,12 @@ pub struct WavPackReader<'a> {
     // If the total_samples is unknown reader will run into trailing metadata
     total_samples: Option<u64>,
     next_ts: u64,
+    stream_start_pos: u64,
 }
 
 impl<'s> WavPackReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
-        //TODO: should already always be aligned, call isn't necessary
+        //TODO: should already always be aligned, finding next block isn't necessary
         let block_pos = find_next_block(&mut mss, 100)?;
         let Some(first_block) = read_block(&mut mss)? else {
             return decode_error("wavpack: missing marker");
@@ -126,6 +129,7 @@ impl<'s> WavPackReader<'s> {
             chapters: None,
             total_samples,
             next_ts: block_index,
+            stream_start_pos: block_pos,
         });
 
     }
@@ -235,7 +239,100 @@ impl FormatReader for WavPackReader<'_> {
     }
 
     fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
-        todo!("seek");
+        if !self.reader.is_seekable() {
+            return seek_error(SeekErrorKind::Unseekable);
+        }
+
+        let track = self.tracks.first().ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
+        let required_ts = match to {
+            SeekTo::TimeStamp { ts, track_id } => {
+                if track_id != track.id {
+                    return seek_error(SeekErrorKind::InvalidTrack);
+                }
+                ts
+            }
+            SeekTo::Time { time, track_id } => {
+                if track_id.is_some_and(|track_id| track_id != track.id) {
+                    return seek_error(SeekErrorKind::InvalidTrack);
+                }
+                let time_base =
+                    track.time_base.ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
+                time_base
+                    .calc_timestamp(time)
+                    .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?
+            }
+        };
+
+        if required_ts.is_negative() {
+            return seek_error(SeekErrorKind::OutOfRange);
+        }
+
+        if self.total_samples.is_some_and(|total| required_ts.get() as u64 > total) {
+            return seek_error(SeekErrorKind::OutOfRange);
+        }
+
+        let track_id = track.id;
+        let original_pos = self.reader.pos();
+
+        let seek_target = 'scan: {
+            // TODO: use seek index instead of scanning from the first block.
+            if let Err(err) = self.reader.seek(std::io::SeekFrom::Start(self.stream_start_pos)) {
+                break 'scan Err(Error::IoError(err));
+            }
+
+            let mut target = None;
+
+            loop {
+                let block_pos = self.reader.pos();
+                let header = match Header::decode(&mut self.reader) {
+                    Ok(header) => header,
+                    Err(Error::IoError(err)) if err.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(Error::Unsupported("wavpack: missing marker")) => break,
+                    Err(err) => break 'scan Err(err),
+                };
+
+                if header.block_samples != 0 && header.is_initial_block() {
+                    let block_index = header.get_block_index();
+                    if block_index > required_ts.get() as u64 {
+                        break;
+                    }
+
+                    target = Some((block_pos, block_index));
+                    let block_end =
+                        block_index.saturating_add(u64::from(header.block_samples));
+                    if (required_ts.get() as u64) < block_end {
+                        break;
+                    }
+                }
+
+                // skip to next block since already consumed part of it (the header)
+                let body_len = match header.body_len() {
+                    Ok(len) => len as u64,
+                    Err(err) => break 'scan Err(err),
+                };
+                if let Err(err) = self.reader.ignore_bytes(body_len) {
+                    break 'scan Err(Error::IoError(err));
+                }
+            }
+
+            Ok(target)
+        };
+        let Some((block_pos, found_ts)) = (match seek_target {
+            Ok(target) => target,
+            Err(err) => {
+                let _ = self.reader.seek(std::io::SeekFrom::Start(original_pos));
+                return Err(err);
+            }
+        }) else {
+            let _ = self.reader.seek(std::io::SeekFrom::Start(original_pos));
+            return seek_error(SeekErrorKind::OutOfRange);
+        };
+
+        self.reader.seek(std::io::SeekFrom::Start(block_pos))?;
+        self.next_ts = found_ts;
+
+        let actual_ts = Timestamp::try_from(found_ts).map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
+        Ok(SeekedTo { track_id, required_ts, actual_ts })
     }
     
     fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
