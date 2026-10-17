@@ -96,6 +96,7 @@
 //!
 //! | Experimental Feature   | Feature Flag          |
 //! |------------------------|-----------------------|
+//! | WavPack demuxer        | `exp-format-wavpack`  |
 //! | Subtitle codec support | `exp-subtitle-codecs` |
 //! | Video codec support    | `exp-video-codecs`    |
 //!
@@ -166,7 +167,7 @@ pub mod default {
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
         pub use symphonia_format_riff::WavReader;
-        #[cfg(feature = "wavpack")]
+        #[cfg(feature = "exp-format-wavpack")]
         pub use symphonia_codec_wavpack::WavPackReader;
 
         #[deprecated = "use `default::formats::MpaReader` instead"]
@@ -284,7 +285,7 @@ pub mod default {
         #[cfg(feature = "wav")]
         probe.register_format::<formats::WavReader<'_>>();
 
-        #[cfg(feature = "wavpack")]
+        #[cfg(feature = "exp-format-wavpack")]
         probe.register_format::<formats::WavPackReader<'_>>();
 
         #[cfg(feature = "ogg")]
