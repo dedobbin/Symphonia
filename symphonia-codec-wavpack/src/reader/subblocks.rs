@@ -7,9 +7,25 @@
 
 use log::debug;
 
-use symphonia_core::errors::Result;
+use symphonia_core::errors::{decode_error, Result};
 use symphonia_core::io::*;
 
+const CHANNEL_INFO_ID: u8 = 0x0d;
+const CHANNEL_IDENTITIES_ID: u8 = 0x2b;
+const SUB_BLOCK_ID_MASK: u8 = 0x3f;
+const SUB_BLOCK_LARGE: u8 = 0x80;
+const SUB_BLOCK_ODD_SIZE: u8 = 0x40;
+
+pub struct ChannelInfo {
+    pub channel_count: u32,
+    pub channel_mask: u32,
+}
+
+pub struct ChannelIdentities {
+    pub identities: Vec<u8>,
+}
+
+#[allow(dead_code)]
 pub enum SubBlock {
     Unknown(Vec<u8>),
     // Padding
@@ -37,8 +53,8 @@ pub enum SubBlock {
     // special extended bitstream for floating point data or integers > 24 bit
     //(can be in either wv or wvc file, depending.....)
     WvxBitStream(Vec<u8>),
-    // Contains channel count and channel_mask
-    ChannelInfo(Vec<u8>),
+    // Channel count and WAVE speaker mask for a track with more than two channels.
+    ChannelInfo(ChannelInfo),
     // contains compressed DSD audio (ver 5.0+)
     DsdBlock(Vec<u8>),
     // RIFF header for .wav files (before audio)
@@ -62,7 +78,7 @@ pub enum SubBlock {
     // new file configuration stuff including file type, non-wav formats (e.g., big endian), and CAF channel layouts and reordering
     NewConfigBlock(Vec<u8>),
     // identities of non-MS channels
-    ChannelIdentities(Vec<u8>),
+    ChannelIdentities(ChannelIdentities),
     // 2- or 4-byte checksum of entire block
     BlockChecksum(Vec<u8>),
 }
@@ -74,7 +90,7 @@ pub fn decode(source: &mut impl ReadBytes) -> Result<SubBlock> {
     }
 
     let size_in_words;
-    if id & 0x80 == 0x80 {
+    if id & SUB_BLOCK_LARGE == SUB_BLOCK_LARGE {
         // debug!("large block, > 255 words");
         let b = source.read_triple_bytes()?;
         size_in_words = (b[0] as u32)
@@ -89,97 +105,93 @@ pub fn decode(source: &mut impl ReadBytes) -> Result<SubBlock> {
         debug!("wavpack: Weird data size");
     }
 
-    if id & 0x40 == 0x40 {
-        debug!("actual data byte len is 1 less");
-    }
-
     // debug!("subblock data size {}", datasize);
     let mut data: Vec<u8> = vec![0; datasize as usize];
     source.read_buf_exact(&mut data)?;
 
-    if id & 0x20 == 0x20 {
-        debug!("wavpack: ignore subblock");
-        return Ok(SubBlock::Unknown(data));
+    // Check if last byte is padding.
+    if id & SUB_BLOCK_ODD_SIZE == SUB_BLOCK_ODD_SIZE {
+        data.pop();
     }
 
-    //todo: use consts
-    let sub_block = match id {
-        id if id & 0x1F == 0x0 => {
+    // todo: use consts for sub block types
+    let sub_block = match id & SUB_BLOCK_ID_MASK {
+        0x0 => {
             SubBlock::Dummy(data)
         },
-        id if id & 0x1F == 0x2 => {
+        0x2 => {
             SubBlock::DecorrelationTerms(data)
         },
-        id if id & 0x1F == 0x3 => {
+        0x3 => {
             SubBlock::DecorrelationWeights(data)
         },
-        id if id & 0x1F == 0x4 => {
+        0x4 => {
             SubBlock::DecorrelationSamples(data)
         },
-        id if id & 0x1F == 0x5 => {
+        0x5 => {
             SubBlock::EntropyVariables(data)
         },
-        id if id & 0x1F == 0x6 => {
+        0x6 => {
             SubBlock::HybridProfile(data)
         },
-        id if id & 0x1F == 0x7 => {
+        0x7 => {
             SubBlock::ShapingWeights(data)
         },
-        id if id & 0x1F == 0x8 => {
+        0x8 => {
             SubBlock::FloatInfo(data)
         },
-        id if id & 0x1F == 0x9 => {
+        0x9 => {
             SubBlock::Int32Info(data)
         },
-        id if id & 0x1F == 0xA => {
+        0xA => {
             SubBlock::WvBitStream(data)
         },
-        id if id & 0x1F == 0xB => {
+        0xB => {
             SubBlock::WvcBitStream(data)
         },
-        id if id & 0x1F == 0xC => {
+        0xC => {
             SubBlock::WvxBitStream(data)
         },
-        id if id & 0x1F == 0xD => {
-            SubBlock::ChannelInfo(data)
+        CHANNEL_INFO_ID => {
+            SubBlock::ChannelInfo(parse_channel_info(&data)?)
         },
-        id if id & 0x1F == 0xE => {
+        0xE => {
             SubBlock::DsdBlock(data)
         },
-        id if id & 0x1F == 0x21 => {
+        0x21 => {
             SubBlock::RiffHeader(data)
         },
-        id if id & 0x1F == 0x22 => {
+        0x22 => {
             SubBlock::RiffTrailer(data)
         },
-        id if id & 0x1F == 0x25 => {
+        0x25 => {
             SubBlock::ConfigChecksum(data)
         },
-        id if id & 0x1F == 0x26 => {
+        0x26 => {
             SubBlock::Md5Checksum(data)
         },
-        id if id & 0x1F == 0x27 => {
+        0x27 => {
             SubBlock::SampleRate(data)
         },
-        id if id & 0x1F == 0x23 => {
+        0x23 => {
             SubBlock::AltHeader(data)
         },
-        id if id & 0x1F == 0x24 => {
+        0x24 => {
             SubBlock::AltTrailer(data)
         },
-        id if id & 0x1F == 0x28 => {
+        0x28 => {
             SubBlock::AltExtension(data)
         },
-        id if id & 0x1F == 0x29 => {
+        0x29 => {
             SubBlock::AltMd5Checksum(data)
         },
-        id if id & 0x1F == 0x2A => {
+        0x2A => {
             SubBlock::NewConfigBlock(data)
         },
-        id if id & 0x1F == 0x2B => {
-            SubBlock::ChannelIdentities(data)
+        CHANNEL_IDENTITIES_ID => {
+            SubBlock::ChannelIdentities(parse_channel_identities(&data)?)
         },
-        id if id & 0x1F == 0x2F => {
+        0x2F => {
             SubBlock::BlockChecksum(data)
         },
         _ => {
@@ -188,4 +200,50 @@ pub fn decode(source: &mut impl ReadBytes) -> Result<SubBlock> {
         },
     };
     return Ok(sub_block);
+}
+
+fn parse_channel_identities(payload: &[u8]) -> Result<ChannelIdentities> {
+    // Identities are numbered from 1, so 0 is rejected. 255 means undefined.
+    if payload.is_empty() || payload.contains(&0) {
+        return decode_error("wavpack: invalid channel identities");
+    }
+    Ok(ChannelIdentities { identities: payload.to_vec() })
+}
+
+fn parse_channel_info(payload: &[u8]) -> Result<ChannelInfo> {
+    // 6 or 7 bytes: 12-bit channel count, 12-bit stream count, then a 3- or 4-byte mask.
+    // 1 to 5 bytes: the first byte is the channel count and the remaining bytes are the mask.
+
+    // This byte layout is not described outside the reference decoder, hence we use that as reference
+    // TODO: validate
+    let (channel_count, channel_mask) = if payload.len() == 6 || payload.len() == 7 {
+        let channel_count = (u32::from(payload[0]) | (u32::from(payload[2] & 0x0f) << 8)) + 1;
+        // TODO: check stream count
+
+        let mut channel_mask = u32::from(payload[3]) | (u32::from(payload[4]) << 8) | (u32::from(payload[5]) << 16);
+        if payload.len() == 7 {
+            channel_mask |= u32::from(payload[6]) << 24;
+        }
+        (channel_count, channel_mask)
+    } else if (1..=5).contains(&payload.len()) {
+        let channel_count = u32::from(payload[0]);
+        let mut channel_mask = 0u32;
+        let mut shift = 0;
+        for byte in &payload[1..] {
+            channel_mask |= u32::from(*byte) << shift;
+            shift += 8;
+        }
+        (channel_count, channel_mask)
+    } else {
+        return decode_error("wavpack: unexpected len for channel info, expected 1-5 or 6-7 bytes");
+    };
+
+    if channel_count == 0 {
+        return decode_error("wavpack: invalid channel info, expected channel count >= 1");
+    }
+    if channel_mask.count_ones() > channel_count {
+        return decode_error("wavpack: invalid channel info, channel mask has more set bits than channels",);
+    }
+
+    Ok(ChannelInfo { channel_count, channel_mask })
 }

@@ -20,7 +20,7 @@ use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Sc
 use symphonia_core::formats::well_known::FORMAT_ID_WAVPACK;
 use symphonia_core::formats::FormatReader;
 use symphonia_core::meta::{Metadata, MetadataLog};
-use symphonia_core::audio::{Channels, layouts};
+use symphonia_core::audio::{Channels, Position, layouts};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::audio::sample::SampleFormat;
@@ -71,21 +71,29 @@ pub struct WavPackReader<'a> {
 impl<'s> WavPackReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
         //TODO: should already always be aligned, finding next block isn't necessary
-        let block_pos = find_next_block(&mut mss, 100)?;
-        let Some(first_block) = read_block(&mut mss)? else {
-            return decode_error("wavpack: missing marker");
-        };
-        let header = first_block.header;
-        let block_index = header.get_block_index();
-        let total_samples = if block_index == 0 {
-            header.get_total_samples()
-        } else {
-            debug!("First block is not first block after all. Total samples unknown");
-            None
-        };
-        let channel_layout = match header.is_stereo() {
-            true => layouts::CHANNEL_LAYOUT_STEREO,
-            false => layouts::CHANNEL_LAYOUT_MONO,
+        let mut block_pos = find_next_block(&mut mss, 100)?;
+        let mut total_samples = None;
+        let (block_index, header, channel_layout) = loop {
+            let Some(block) = read_block(&mut mss)? else {
+                return decode_error("wavpack: eof before any samples are found");
+            };
+
+            let block_index = block.header.get_block_index();
+            if total_samples.is_none() && block_index == 0 {
+                total_samples = block.header.get_total_samples();
+            }
+            if block.is_metadata() {
+                block_pos = find_next_block(&mut mss, 100)?;
+                continue;
+            }
+
+            let first_audio_block = block;
+            if total_samples.is_none() && block_index != 0 {
+                debug!("first audio block does not start at sample 0, total samples unknown");
+            }
+            // Plain mono or stereo file defines channel layout in block header, while other layouts are stored in subblocks of first audio block
+            let channel_layout = channels_for_track(&first_audio_block.body, first_audio_block.header.is_stereo())?;
+            break (block_index, first_audio_block.header, channel_layout);
         };
 
         let mut codec_params = AudioCodecParameters::new();
@@ -367,6 +375,10 @@ struct Block {
 }
 
 impl Block {
+    fn is_metadata(&self) -> bool {
+        self.header.block_samples == 0
+    }
+
     fn append_to(self, packet_data: &mut Vec<u8>) {
         packet_data.reserve(HEADER_SIZE as usize + self.body.len());
         packet_data.extend_from_slice(&STREAM_MARKER);
@@ -490,6 +502,53 @@ impl Header {
             None
         }
     }
+}
+
+fn channels_for_track(body: &[u8], fallback_stereo: bool) -> Result<Channels> {
+    // WavPack 4 & 5 Binary File / Block Format (https://www.wavpack.com/WavPack5FileFormat.pdf): 
+    // "The speaker assignments are in standard Microsoft order". aka WAVEFORMATEXTENSIBLE
+
+    let mut reader = BufReader::new(body);
+    let mut channel_info = None;
+    let mut identities = None;
+
+    while reader.bytes_available() > 0 {
+        match subblocks::decode(&mut reader)? {
+            subblocks::SubBlock::ChannelInfo(info) if channel_info.is_none() => {
+                channel_info = Some(info);
+            }
+            subblocks::SubBlock::ChannelIdentities(parsed) if identities.is_none() => {
+                identities = Some(parsed);
+            }
+            _ => {}
+        }
+    }
+
+    let Some(info) = channel_info else {
+        return Ok(if fallback_stereo {
+            layouts::CHANNEL_LAYOUT_STEREO
+        } else {
+            layouts::CHANNEL_LAYOUT_MONO
+        });
+    };
+
+    let mask_bits = info.channel_mask.count_ones();
+    if identities.is_none() && mask_bits == info.channel_count {
+        // if channels do not have specific identities and the mask fits,
+        // store those bits as standard WAVE positions.
+        if let Some(positions) = Position::from_wave_channel_mask(info.channel_mask) {
+            return Ok(Channels::Positioned(positions));
+        }
+    }
+
+    // TODO: handle identities
+    // WavPack 5 Porting Guide For Developers, section 6.0
+    // (https://www.wavpack.com/WavPack5PortingGuide.pdf):
+    // "the 18 Microsoft channels must come first in the file (and in that order)".
+    // "allow non-Microsoft channels to have identities. These identities are numbered from 1 to 254".
+    // "A value of 255 indicates a truly undefined channel. These channels so defined
+    // may be in any order, but must still be after the ordered Microsoft channels."
+    decode_error("wavpack: channel identities are not handled")
 }
 
 fn find_next_block(source: &mut MediaSourceStream<'_>, max_bytes: usize) -> Result<u64> {
