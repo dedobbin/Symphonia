@@ -20,7 +20,7 @@ pub struct BitSetIterator<'a> {
     count: usize,
 }
 
-impl<'a> Iterator for BitSetIterator<'a> {
+impl Iterator for BitSetIterator<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -123,7 +123,7 @@ mod tests {
 
         assert_eq!(bitset.count(), 0);
 
-        for _ in bitset.iter() {
+        if let Some(_) = bitset.iter().next() {
             panic!("Should be empty!");
         }
 

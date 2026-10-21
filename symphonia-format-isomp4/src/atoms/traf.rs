@@ -5,16 +5,15 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use symphonia_core::errors::{decode_error, Result};
+use symphonia_core::errors::{Result, decode_error};
 use symphonia_core::io::ReadBytes;
 
 use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, TfhdAtom, TrunAtom};
 
 /// Track fragment atom.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct TrafAtom {
-    /// Atom header.
-    header: AtomHeader,
     /// Track fragment header.
     pub tfhd: TfhdAtom,
     /// Track fragment sample runs.
@@ -24,10 +23,6 @@ pub struct TrafAtom {
 }
 
 impl Atom for TrafAtom {
-    fn header(&self) -> AtomHeader {
-        self.header
-    }
-
     fn read<B: ReadBytes>(reader: &mut B, header: AtomHeader) -> Result<Self> {
         let mut tfhd = None;
         let mut truns = Vec::new();
@@ -37,7 +32,7 @@ impl Atom for TrafAtom {
         let mut total_sample_count = 0;
 
         while let Some(header) = iter.next()? {
-            match header.atype {
+            match header.atom_type {
                 AtomType::TrackFragmentHeader => {
                     tfhd = Some(iter.read_atom::<TfhdAtom>()?);
                 }
@@ -58,6 +53,6 @@ impl Atom for TrafAtom {
             return decode_error("isomp4: missing tfhd atom");
         }
 
-        Ok(TrafAtom { header, tfhd: tfhd.unwrap(), truns, total_sample_count })
+        Ok(TrafAtom { tfhd: tfhd.unwrap(), truns, total_sample_count })
     }
 }

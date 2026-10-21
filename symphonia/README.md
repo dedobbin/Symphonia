@@ -20,8 +20,8 @@
     <a href="https://deps.rs/repo/github/pdeljanov/symphonia">
         <img src="https://deps.rs/repo/github/pdeljanov/symphonia/status.svg" />
     </a>
-    <a href="https://blog.rust-lang.org/2021/06/17/Rust-1.53.0.html">
-        <img alt="Rustc Version 1.53.0+" src="https://img.shields.io/badge/rustc-1.53%2B-lightgrey.svg"/>
+    <a href="https://blog.rust-lang.org/2024/03/21/Rust-1.77.0.html">
+        <img alt="Rustc Version 1.77+" src="https://img.shields.io/badge/rustc-1.77%2B-lightgrey.svg"/>
     </a>
 </p>
 
@@ -133,14 +133,20 @@ A `symphonia-bundle-*` package is a combination of a decoder and a native demuxe
 
 All metadata readers are provided by the `symphonia-metadata` crate.
 
-| Format                | Status    |
-|-----------------------|-----------|
-| ID3v1                 | Great     |
-| ID3v2                 | Great     |
-| ISO/MP4               | Great     |
-| RIFF                  | Great     |
-| Vorbis comment (FLAC) | Perfect   |
-| Vorbis comment (OGG)  | Perfect   |
+For metadata formats that are standalone and not part of the media container, a feature flag may be used to toggle support.
+
+| Format                | Status    | Feature Flag | Default |
+|-----------------------|-----------|--------------|---------|
+| APEv1                 | Great     | `ape`        | Yes     |
+| APEv2                 | Great     | `ape`        | Yes     |
+| ID3v1                 | Great     | `id3v1`      | Yes     |
+| ID3v2                 | Great     | `id3v2`      | Yes     |
+| ISO/MP4               | Great     | N/A          | N/A     |
+| RIFF                  | Great     | N/A          | N/A     |
+| Vorbis comment (FLAC) | Perfect   | N/A          | N/A     |
+| Vorbis comment (OGG)  | Perfect   | N/A          | N/A     |
+
+> **Tip:** All metadata formats can be enabled with the `all-meta` feature flag.
 
 ## Quality
 
@@ -181,6 +187,12 @@ Symphonia provides the following tools for debugging purposes:
 
 * [`symphonia-play`](https://github.com/pdeljanov/Symphonia/tree/master/symphonia-play) for probing, decoding, validating, and playing back media streams.
 * [`symphonia-check`](https://github.com/pdeljanov/Symphonia/tree/master/symphonia-check) for validating Symphonia's decoded output against various decoders.
+
+## Minimum Supported Rust Version
+
+The minimum supported Rust version (MSRV) for Symphonia 0.6.x releases is 1.77.
+
+This project considers incrementing the MSRV to be a SemVer breaking change.
 
 ## Author
 

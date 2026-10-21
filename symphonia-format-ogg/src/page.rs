@@ -6,7 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::checksum::Crc32;
-use symphonia_core::errors::{decode_error, Error, Result};
+use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::io::{BufReader, Monitor, MonitorStream, ReadBytes, SeekBuffered};
 
 use log::{debug, warn};
@@ -98,12 +98,7 @@ impl<'a> PagePackets<'a> {
         // Consume the rest of the packets.
         let discard = usize::from(self.lens.sum::<u16>());
 
-        if self.data.len() > discard {
-            Some(&self.data[discard..])
-        }
-        else {
-            None
-        }
+        if self.data.len() > discard { Some(&self.data[discard..]) } else { None }
     }
 }
 
@@ -130,7 +125,7 @@ pub struct Page<'a> {
     page_buf: &'a [u8],
 }
 
-impl<'a> Page<'a> {
+impl Page<'_> {
     /// Returns an iterator over all complete packets within the page.
     ///
     /// If this page contains a partial packet, then the partial packet data may be retrieved using
@@ -326,7 +321,7 @@ impl PageReader {
         if len > self.page_buf.len() {
             // New page buffer size, rounded up to the nearest 8K block.
             let new_buf_len = (len + (8 * 1024 - 1)) & !(8 * 1024 - 1);
-            debug!("grow page buffer to {} bytes", new_buf_len);
+            debug!("grow page buffer to {new_buf_len} bytes");
 
             self.page_buf.resize(new_buf_len, Default::default());
         }
